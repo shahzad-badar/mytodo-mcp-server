@@ -1,0 +1,35 @@
+# What the person running scripts/bootstrap-*.sh must hold. The scripts test for
+# every one before they create anything, so a run either has all of them or
+# changes nothing. Format: <tools|env> <permission>.
+#
+# roles/owner on both projects covers all of it. Narrower: on the tools project,
+# roles/iam.serviceAccountAdmin, roles/iam.workloadIdentityPoolAdmin,
+# roles/storage.admin, roles/serviceusage.serviceUsageAdmin and
+# roles/resourcemanager.projectIamAdmin; on each environment project,
+# roles/resourcemanager.projectIamAdmin and roles/serviceusage.serviceUsageAdmin.
+
+tools serviceusage.services.enable
+tools serviceusage.services.list
+tools iam.serviceAccounts.create
+tools iam.serviceAccounts.get
+tools iam.serviceAccounts.getIamPolicy
+tools iam.serviceAccounts.setIamPolicy
+tools iam.workloadIdentityPools.create
+tools iam.workloadIdentityPools.get
+tools iam.workloadIdentityPoolProviders.create
+tools iam.workloadIdentityPoolProviders.get
+tools iam.workloadIdentityPoolProviders.update
+tools storage.buckets.create
+tools storage.buckets.get
+tools storage.buckets.update
+tools storage.buckets.getIamPolicy
+tools storage.buckets.setIamPolicy
+tools storage.objects.create
+tools storage.objects.list
+tools resourcemanager.projects.get
+
+env serviceusage.services.enable
+env serviceusage.services.list
+env resourcemanager.projects.get
+env resourcemanager.projects.getIamPolicy
+env resourcemanager.projects.setIamPolicy

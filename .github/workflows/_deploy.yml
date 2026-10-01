@@ -1,0 +1,191 @@
+name: Deploy (reusable)
+
+# Every environment deploys through this workflow and reads its values from its GitHub Environment.
+# Dev builds the image, and prod copies dev's image by digest so prod runs exactly what dev tested.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment holding this deployment's variables and secrets.
+        type: string
+        required: true
+      image_source:
+        description: build (from this commit) or promote (copy another environment's image).
+        type: string
+        required: true
+      sha:
+        description: Full 40-character commit SHA to deploy. For promote, the commit whose already-built image is promoted.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  # Every deploy federates through one pool in the tools project, which pins this repository.
+  # Deployer SAs trust the environment claim, so a job without `environment:` cannot mint a token.
+  id-token: write
+
+jobs:
+  # This job declares no environment, so it holds no credentials.
+  # It rejects a bad request before any approval gate.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0 # the guard below needs history to test ancestry
+
+      - name: Validate the request
+        env:
+          IMAGE_SOURCE: ${{ inputs.image_source }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          case "$IMAGE_SOURCE" in
+            build | promote) ;;
+            *)
+              echo "::error::image_source must be 'build' or 'promote', got '$IMAGE_SOURCE'."
+              exit 1
+              ;;
+          esac
+          # The build job tags images with the full SHA, so a short SHA would never match a tag.
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::sha must be a full 40-character commit SHA, got '$SHA'."
+            exit 1
+          fi
+
+      # A build deploy must be the tip of main so an old or overtaken run never lands a stale image.
+      # A promote deploy may lag behind the tip but must be a commit on main.
+      - name: Guard the commit
+        env:
+          IMAGE_SOURCE: ${{ inputs.image_source }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          git fetch --no-tags origin main
+          tip="$(git rev-parse FETCH_HEAD)"
+
+          if [ "$IMAGE_SOURCE" = "build" ]; then
+            if [ "$tip" != "$SHA" ]; then
+              echo "::error::Refusing to deploy $SHA: main is now $tip. A newer run will deploy it."
+              exit 1
+            fi
+            echo "$SHA is the tip of main."
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor "$SHA" FETCH_HEAD; then
+            echo "::error::Refusing to promote $SHA: it is not an ancestor of main. Only a commit that landed on main may be deployed."
+            exit 1
+          fi
+          echo "$SHA is an ancestor of main (tip $tip)."
+
+  mcp:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.sha }}
+
+      # This step checks every required value before any credential and names each missing one.
+      # The README section "What deploy expects" lists them.
+      - name: Is ${{ inputs.environment }} ready to deploy?
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE_SOURCE: ${{ inputs.image_source }}
+          WIF_PROVIDER: ${{ secrets.DEPLOY_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOY_SA: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_ARTIFACT_REGISTRY_REPO: ${{ vars.GCP_ARTIFACT_REGISTRY_REPO }}
+          CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+          ENTRA_TENANT_ID: ${{ vars.ENTRA_TENANT_ID }}
+          RESOURCE_AUDIENCE: ${{ vars.RESOURCE_AUDIENCE }}
+          RESOURCE_BASE_URL: ${{ vars.RESOURCE_BASE_URL }}
+          SCOPES_SUPPORTED: ${{ vars.SCOPES_SUPPORTED }}
+          OAUTH_PROXY_ENABLED: ${{ vars.OAUTH_PROXY_ENABLED }}
+          ENTRA_CLIENT_ID: ${{ vars.ENTRA_CLIENT_ID }}
+          PROMOTE_SOURCE_IMAGE: ${{ vars.PROMOTE_SOURCE_IMAGE }}
+        run: |
+          problems=()
+          need() { [ -n "${!1}" ] || problems+=("$2 $3 is not set — $4"); }
+          need WIF_PROVIDER repository secret DEPLOY_WORKLOAD_IDENTITY_PROVIDER "the deploy pool's GitHub OIDC provider"
+          need DEPLOY_SA "$ENVIRONMENT environment secret" GCP_SERVICE_ACCOUNT "infra/mcp's deploy_service_account output"
+          need GCP_PROJECT_ID "$ENVIRONMENT environment variable" GCP_PROJECT_ID "the project infra/mcp was applied to"
+          need GCP_REGION "$ENVIRONMENT environment variable" GCP_REGION "infra/mcp's region"
+          need GCP_ARTIFACT_REGISTRY_REPO "$ENVIRONMENT environment variable" GCP_ARTIFACT_REGISTRY_REPO "infra/mcp's artifact_registry_repo output"
+          need CLOUD_RUN_SERVICE "$ENVIRONMENT environment variable" CLOUD_RUN_SERVICE "infra/mcp's cloud_run_service output"
+          need ENTRA_TENANT_ID "$ENVIRONMENT environment variable" ENTRA_TENANT_ID "your Entra tenant id"
+          need RESOURCE_AUDIENCE "$ENVIRONMENT environment variable" RESOURCE_AUDIENCE "the Entra resource app's client id"
+          need RESOURCE_BASE_URL "$ENVIRONMENT environment variable" RESOURCE_BASE_URL "https://<gateway_domain>"
+          # SCOPES_SUPPORTED is pinned because Entra rejects a whole authorization request
+          # that names a scope the resource app does not expose.
+          need SCOPES_SUPPORTED "$ENVIRONMENT environment variable" SCOPES_SUPPORTED "the scopes exposed on the Entra resource app, space-separated"
+          if [ "$OAUTH_PROXY_ENABLED" = true ]; then
+            need ENTRA_CLIENT_ID "$ENVIRONMENT environment variable" ENTRA_CLIENT_ID "the Entra client app's id (OAUTH_PROXY_ENABLED is true)"
+          fi
+          if [ "$IMAGE_SOURCE" = promote ]; then
+            need PROMOTE_SOURCE_IMAGE "$ENVIRONMENT environment variable" PROMOTE_SOURCE_IMAGE "the source environment's infra/mcp image_repository output"
+          fi
+
+          if [ ${#problems[@]} -eq 0 ]; then exit 0; fi
+          for p in "${problems[@]}"; do echo "::error title=$ENVIRONMENT is not ready to deploy::$p"; done
+          echo "$ENVIRONMENT is in ENABLED_ENVIRONMENTS, so it deploys. Set the values above, or remove it from the variable. See the README, 'What deploy expects'." >&2
+          exit 1
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.DEPLOY_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      - name: Build and push the image
+        if: inputs.image_source == 'build'
+        env:
+          REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev
+          IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REGISTRY_REPO }}/${{ vars.CLOUD_RUN_SERVICE }}:${{ inputs.sha }}
+        run: |
+          gcloud auth configure-docker "$REGISTRY" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      # PROMOTE_SOURCE_IMAGE is the source registry path without a tag.
+      # The source environment's image_reader_service_accounts grants this deployer read access.
+      - name: Promote the source environment's image
+        if: inputs.image_source == 'promote'
+        env:
+          SOURCE_IMAGE: ${{ vars.PROMOTE_SOURCE_IMAGE }}
+          DEST_IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REGISTRY_REPO }}/${{ vars.CLOUD_RUN_SERVICE }}
+          SHA: ${{ inputs.sha }}
+        run: scripts/promote-image.sh
+
+      # AS_ISSUER and AS_JWKS_URI must stay absent because they repoint the authority this server trusts.
+      # The server refuses to boot with them on Cloud Run.
+      - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d # v3
+        with:
+          service: ${{ vars.CLOUD_RUN_SERVICE }}
+          region: ${{ vars.GCP_REGION }}
+          image: ${{ env.IMAGE }}
+          # An unset CLOUD_RUN_INVOKER_FLAG keeps the service closed, so Cloud Run answers 403 itself.
+          # A live environment sets --allow-unauthenticated, and the server then validates the Entra token.
+          flags: ${{ vars.CLOUD_RUN_INVOKER_FLAG || '--no-allow-unauthenticated' }}
+          env_vars_update_strategy: overwrite
+          # env_vars is a literal block, so a # line inside it would reach Cloud Run as an entry.
+          env_vars: |
+            ENTRA_TENANT_ID=${{ vars.ENTRA_TENANT_ID }}
+            RESOURCE_AUDIENCE=${{ vars.RESOURCE_AUDIENCE }}
+            RESOURCE_BASE_URL=${{ vars.RESOURCE_BASE_URL }}
+            OAUTH_PROXY_ENABLED=${{ vars.OAUTH_PROXY_ENABLED }}
+            ENTRA_CLIENT_ID=${{ vars.ENTRA_CLIENT_ID }}
+            OAUTH_PROXY_ALLOWED_REDIRECT_URIS=${{ vars.OAUTH_PROXY_ALLOWED_REDIRECT_URIS }}
+            SCOPES_SUPPORTED=${{ vars.SCOPES_SUPPORTED }}

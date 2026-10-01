@@ -1,0 +1,7 @@
+# Enabled on the tools project before anything is created in it.
+iam.googleapis.com
+iamcredentials.googleapis.com
+sts.googleapis.com
+storage.googleapis.com
+serviceusage.googleapis.com
+cloudresourcemanager.googleapis.com

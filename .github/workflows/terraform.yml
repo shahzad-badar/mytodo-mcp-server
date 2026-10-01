@@ -1,0 +1,312 @@
+name: Terraform
+
+# CI applies all infrastructure so credentials stay short-lived and reviewers approve a saved plan.
+# ENABLED_ENVIRONMENTS selects the environments, and each infra/<root>/main.tf selects a root.
+
+on:
+  pull_request:
+    paths:
+      - infra/**
+      - scripts/bootstrap-lib.sh
+      - scripts/check-apply-roles.sh
+      - scripts/tf-env-vars.sh
+      - scripts/install-terraform.sh
+      - .github/workflows/terraform.yml
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to plan and apply. Must be listed in the ENABLED_ENVIRONMENTS repository variable. Add a choice here to add an environment."
+        type: choice
+        options: [dev, prod]
+        required: true
+      root:
+        description: "Root to plan and apply. A new environment goes in order: mcp, gateway, monitoring, dns."
+        type: choice
+        options: [mcp, gateway, monitoring, dns]
+        required: true
+
+# Terraform runs never cancel because a cancelled run can leave a state lock behind.
+# The group key includes environment and root, so dev and prod applies do not queue together.
+concurrency:
+  group: terraform-${{ github.event.inputs.environment || github.ref }}-${{ github.event.inputs.root || 'all' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation, and Azure OIDC for the dns root
+
+env:
+  # scripts/install-terraform.sh pins the Terraform version.
+  TF_IN_AUTOMATION: "1"
+
+jobs:
+  # This job holds no credentials or variables, so it also runs in the template repository.
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Terraform
+        run: ./scripts/install-terraform.sh
+
+      - name: Formatting
+        run: terraform fmt -check -recursive -diff infra
+
+      - name: Validate every root
+        run: |
+          for dir in infra/*/; do
+            [ -f "$dir/main.tf" ] || continue
+            echo "::group::$dir"
+            # Validation needs no state or credentials, so init skips the backend.
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+
+  # A pull request plans every enabled environment and root, and a dispatch plans one pair.
+  setup:
+    name: What to plan
+    if: ${{ !github.event.repository.is_template }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build the plan matrix
+        id: matrix
+        env:
+          ENABLED: ${{ vars.ENABLED_ENVIRONMENTS }}
+          EVENT: ${{ github.event_name }}
+          WANT_ENV: ${{ github.event.inputs.environment }}
+          WANT_ROOT: ${{ github.event.inputs.root }}
+        run: |
+          # This list keeps roots in apply order, as scripts/bootstrap-lib.sh does.
+          roots=""
+          for r in mcp gateway monitoring dns; do [ -f "infra/$r/main.tf" ] && roots="$roots $r"; done
+          for dir in infra/*/; do
+            r=$(basename "$dir")
+            [ -f "$dir/main.tf" ] && case " mcp gateway monitoring dns " in *" $r "*) ;; *) roots="$roots $r" ;; esac
+          done
+
+          if [ "$EVENT" = workflow_dispatch ]; then
+            case " $ENABLED " in
+              *" $WANT_ENV "*) ;;
+              *)
+                echo "::error::$WANT_ENV is not in the ENABLED_ENVIRONMENTS repository variable ('$ENABLED'). Bootstrap it (scripts/bootstrap-env.sh $WANT_ENV), then add it. See infra/README.md." >&2
+                exit 1 ;;
+            esac
+            case " $roots " in
+              *" $WANT_ROOT "*) ;;
+              *)
+                echo "::error::infra/$WANT_ROOT does not exist in this repository, so there is nothing to apply." >&2
+                exit 1 ;;
+            esac
+            envs=$WANT_ENV
+            roots=$WANT_ROOT
+          else
+            envs=$ENABLED
+          fi
+
+          matrix=$(jq -cn --arg envs "$envs" --arg roots "$roots" '
+            [($envs | split(" ") | map(select(. != ""))[]) as $e
+             | ($roots | split(" ") | map(select(. != ""))[]) as $r
+             | {environment: $e, root: $r}]')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+          if [ "$matrix" = "[]" ]; then
+            echo "::notice::No environments enabled, so nothing was planned. Set the ENABLED_ENVIRONMENTS repository variable once an environment is bootstrapped — see infra/README.md."
+          fi
+
+  plan:
+    name: Plan (${{ matrix.environment }}/${{ matrix.root }})
+    needs: setup
+    if: ${{ needs.setup.outputs.matrix != '[]' && needs.setup.outputs.matrix != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      ENV: ${{ matrix.environment }}
+      ROOT: ${{ matrix.root }}
+      # The plan job declares no environment because prod's approval gate would block every pull request.
+      # Per-environment values are therefore repository variables with a suffix, such as TF_STATE_BUCKET_DEV.
+      REPO_VARS: ${{ toJSON(vars) }}
+      WIF_PROVIDER: ${{ secrets.TF_WORKLOAD_IDENTITY_PROVIDER }}
+      PLAN_SA: ${{ secrets.TF_PLAN_SERVICE_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Export the TF_* repository variables
+        run: jq -r 'to_entries[] | select(.key | startswith("TF_")) | "\(.key)=\(.value)"' <<<"$REPO_VARS" >> "$GITHUB_ENV"
+
+      - name: Resolve this environment's values
+        env:
+          TF_ROLE: plan
+        run: ./scripts/tf-env-vars.sh
+
+      # An enabled environment must be complete, so this step reports every gap and then fails.
+      - name: Is ${{ matrix.environment }} ready?
+        run: |
+          problems=()
+          suffix=$(echo "$ENV" | tr '[:lower:]-' '[:upper:]_')
+          [ -n "$STATE_BUCKET" ] || problems+=("repository variable TF_STATE_BUCKET_${suffix} is not set (scripts/bootstrap-env.sh $ENV prints it)")
+          [ -n "$WIF_PROVIDER" ] || problems+=("repository secret TF_WORKLOAD_IDENTITY_PROVIDER is not set (scripts/bootstrap-tools.sh prints it)")
+          [ -n "$PLAN_SA" ] || problems+=("repository secret TF_PLAN_SERVICE_ACCOUNT is not set (scripts/bootstrap-tools.sh prints it)")
+          # The azurerm provider needs a credential before refresh, so the dns root cannot plan without one.
+          if [ "$ROOT" = dns ] && [ -z "$ARM_CLIENT_ID" ]; then
+            problems+=("repository variable TF_ARM_CLIENT_ID_PLAN (or TF_ARM_CLIENT_ID_${suffix}) is not set (scripts/bootstrap-dns.sh $ENV prints it; or delete infra/dns)")
+          fi
+          vars_file="infra/$ROOT/env/$ENV.tfvars"
+          if [ ! -f "$vars_file" ]; then
+            problems+=("$vars_file does not exist")
+          # grep drops comments first because the tfvars header mentions REPLACE_ME.
+          elif grep -v '^[[:space:]]*#' "$vars_file" | grep -q REPLACE_ME; then
+            problems+=("$vars_file still has REPLACE_ME values")
+          fi
+          if grep -v '^[[:space:]]*#' infra/bootstrap/bootstrap.env | grep -q REPLACE_ME; then
+            problems+=("infra/bootstrap/bootstrap.env still has REPLACE_ME values")
+          fi
+          # Internal-only ingress admits only the load balancer, so the mcp root needs the gateway root.
+          if [ "$ROOT" = mcp ] && [ ! -f infra/gateway/main.tf ] &&
+            grep -v '^[[:space:]]*#' "$vars_file" | grep -q 'INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER'; then
+            problems+=("infra/gateway is gone but $vars_file sets cloud_run_ingress to INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER: nothing could reach the service. Set INGRESS_TRAFFIC_ALL")
+          fi
+
+          if [ ${#problems[@]} -eq 0 ]; then exit 0; fi
+          for p in "${problems[@]}"; do echo "::error title=$ENV/$ROOT is not ready::$p"; done
+          echo "$ENV is listed in ENABLED_ENVIRONMENTS, so these must be fixed rather than skipped. Remove it from the variable to stop planning it. See infra/README.md." >&2
+          exit 1
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.TF_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.TF_PLAN_SERVICE_ACCOUNT }}
+
+      # This check runs before the plan so a missing apply role fails the pull request.
+      # Otherwise the 403 would appear only after a reviewer approved the apply.
+      - name: Does the apply identity hold what ${{ matrix.root }} needs?
+        run: ./scripts/check-apply-roles.sh "$ENV" "$ROOT"
+
+      # The read-only plan identity cannot create state, so scripts/bootstrap-env.sh seeds every root.
+      # A missing state object means that script has not run for this root.
+      - name: Does ${{ matrix.root }} have state in ${{ matrix.environment }}?
+        run: |
+          object="gs://$STATE_BUCKET/$ROOT/default.tfstate"
+          if gcloud storage objects describe "$object" --format="value(name)" \
+            >/dev/null 2>"$RUNNER_TEMP/describe.err"; then
+            exit 0
+          fi
+          if grep -qiE '404|not found|does not exist' "$RUNNER_TEMP/describe.err"; then
+            echo "::error::$object does not exist. Run scripts/bootstrap-env.sh $ENV, which seeds every root's state." >&2
+          else
+            # A 403 here means the plan identity lost storage.objectViewer.
+            echo "::error::Could not read $object as the plan identity. scripts/bootstrap-env.sh $ENV --check reports what is missing." >&2
+            cat "$RUNNER_TEMP/describe.err" >&2
+          fi
+          exit 1
+
+      - name: Install Terraform
+        run: ./scripts/install-terraform.sh
+
+      - name: Plan
+        env:
+          ARM_USE_OIDC: "true"
+        run: |
+          cd "infra/$ROOT"
+          # No backend block names a bucket, so init fails without this flag.
+          terraform init -reconfigure -input=false -backend-config="bucket=$STATE_BUCKET"
+          # The plan identity cannot write the lock object, so the plan runs with -lock=false.
+          terraform plan -input=false -lock=false -var-file="env/$ENV.tfvars" -out=tfplan
+          {
+            echo "### $ENV / $ROOT"
+            echo '```'
+            # GitHub caps step summaries at 1 MiB. A file avoids SIGPIPE from head under pipefail.
+            terraform show -no-color tfplan > "$RUNNER_TEMP/tfplan.txt"
+            head -c 800000 "$RUNNER_TEMP/tfplan.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Apply executes this saved plan exactly as the reviewer approved it.
+      # The plan can contain resource attributes, so the artifact expires after one day.
+      - name: Upload the plan
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tfplan-${{ matrix.environment }}-${{ matrix.root }}
+          path: infra/${{ matrix.root }}/tfplan
+          retention-days: 1
+          if-no-files-found: error
+
+  apply:
+    name: Apply (${{ github.event.inputs.environment }}/${{ github.event.inputs.root }})
+    if: ${{ github.event_name == 'workflow_dispatch' && !github.event.repository.is_template }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # The environment's protection rules gate this job, with required reviewers on prod.
+    # Each apply identity trusts only refs/heads/main, so another branch cannot mint a token.
+    environment: ${{ github.event.inputs.environment }}
+    env:
+      ENV: ${{ github.event.inputs.environment }}
+      ROOT: ${{ github.event.inputs.root }}
+      REPO_VARS: ${{ toJSON(vars) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Apply drops TF_ARM_CLIENT_ID_PLAN and uses the environment's own Azure app registration.
+      # That registration trusts only the environment claim, which a pull request never carries.
+      - name: Export the TF_* repository variables
+        run: jq -r 'to_entries[] | select((.key | startswith("TF_")) and .key != "TF_ARM_CLIENT_ID_PLAN") | "\(.key)=\(.value)"' <<<"$REPO_VARS" >> "$GITHUB_ENV"
+
+      - name: Resolve this environment's values
+        env:
+          TF_ROLE: apply
+        run: ./scripts/tf-env-vars.sh
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.TF_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.TF_APPLY_SERVICE_ACCOUNT }}
+
+      - name: Install Terraform
+        run: ./scripts/install-terraform.sh
+
+      - name: Download the approved plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tfplan-${{ github.event.inputs.environment }}-${{ github.event.inputs.root }}
+          path: infra/${{ github.event.inputs.root }}
+
+      - name: Apply
+        env:
+          ARM_USE_OIDC: "true"
+        run: |
+          cd "infra/$ROOT"
+          terraform init -reconfigure -input=false -backend-config="bucket=$STATE_BUCKET"
+          # Apply takes no -var-file because the saved plan holds the values and is bound to its state.
+          # The apply fails if state changed during approval, so it never applies an unreviewed plan.
+          terraform apply -input=false -no-color tfplan 2>&1 | tee "$RUNNER_TEMP/apply.log"
+
+      # The plan already checked apply-roles.txt, so a 403 here usually means a role missing from it.
+      # This step names the fix instead of leaving only the raw error.
+      - name: Explain a permission failure
+        if: failure()
+        run: |
+          [ -f "$RUNNER_TEMP/apply.log" ] || exit 0
+          if grep -qE 'Error 403|PERMISSION_DENIED|does not have .* permission|AuthorizationFailed' "$RUNNER_TEMP/apply.log"; then
+            echo "::error title=The apply identity was refused::See the Apply step for the exact permission. If the plan's apply-identity check passed, the role that grants it is missing from infra/bootstrap/apply-roles.txt: add it, run scripts/bootstrap-env.sh $ENV, and re-dispatch. 'scripts/bootstrap-env.sh $ENV --check' shows everything else. For dns, the Azure role assignment: scripts/bootstrap-dns.sh $ENV --check."
+          fi
+
+      - name: Outputs
+        run: |
+          cd "infra/$ROOT"
+          terraform output

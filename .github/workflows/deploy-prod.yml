@@ -1,0 +1,53 @@
+name: Deploy to prod
+
+# This workflow promotes a commit dev already runs and never builds, so prod runs dev's tested image.
+# Prod's deployer trusts only the prod environment claim, which the main-only branch rule protects.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA to promote. Blank promotes the tip of main.
+        required: false
+        type: string
+
+# A prod deploy never cancels because a half-applied Cloud Run revision is worse than a queued one.
+concurrency:
+  group: deploy-prod-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # required for Workload Identity Federation
+
+jobs:
+  enabled:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Is prod enabled?
+        env:
+          ENABLED: ${{ vars.ENABLED_ENVIRONMENTS }}
+          IS_TEMPLATE: ${{ github.event.repository.is_template }}
+        run: |
+          if [ "$IS_TEMPLATE" = true ]; then
+            echo "::error::This is the template repository; it deploys nothing. Create a repository from it."
+            exit 1
+          fi
+          case " $ENABLED " in
+            *" prod "*) ;;
+            *)
+              echo "::error::prod is not in the ENABLED_ENVIRONMENTS repository variable ('$ENABLED'). Bring it up first — infra/README.md, 'Adding prod'."
+              exit 1 ;;
+          esac
+
+  prod:
+    needs: enabled
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: prod
+      image_source: promote
+      # github.sha is the tip of the dispatched ref, so a blank input promotes
+      # the current tip of main.
+      sha: ${{ inputs.sha || github.sha }}
+    secrets: inherit

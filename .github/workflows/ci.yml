@@ -1,0 +1,94 @@
+name: CI
+
+# The tests drive the real server through its auth path, so a weakened scope or role check fails here.
+# CI reads nothing from infra/, so the server still builds after infra/ is deleted.
+
+# Setup skips `cache: npm` because that option fails the job when the lockfile moves.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Tests
+        run: npm test
+
+      # The nullglob option lets this step pass after the scripts are deleted.
+      - name: Shell syntax
+        run: |
+          shopt -s nullglob
+          for script in scripts/*.sh; do bash -n "$script"; done
+
+  # The Wiz scan runs once the repository variable WIZ_CLIENT_ID is set.
+  # Fork pull requests get no secrets, so the scan skips them.
+  security-scan:
+    if: >-
+      vars.WIZ_CLIENT_ID != '' &&
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Wiz CLI scan
+        env:
+          WIZ_CLIENT_ID: ${{ vars.WIZ_CLIENT_ID }}
+          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+          WIZ_PROJECT_ID: ${{ vars.WIZ_PROJECT_ID }}
+          WIZCLI_VERSION: "1.65.0"
+          WIZCLI_SHA256: "c19a50dc4ec14e7271f4fd87c703a72084705615c932f61ae39744dff4f12a6c"
+          SCAN_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          # The job declares no environment, so both values must be repository scoped.
+          if [ -z "$WIZ_CLIENT_SECRET" ]; then
+            echo "::error::WIZ_CLIENT_ID is set but the repository secret WIZ_CLIENT_SECRET is empty." >&2
+            exit 1
+          fi
+
+          # RUNNER_TEMP is outside the workspace, so the scan does not include the CLI.
+          curl -fsSLo "$RUNNER_TEMP/wizcli" \
+            "https://downloads.wiz.io/v1/wizcli/$WIZCLI_VERSION/wizcli-linux-amd64"
+          echo "$WIZCLI_SHA256  $RUNNER_TEMP/wizcli" | sha256sum --check --strict
+          chmod +x "$RUNNER_TEMP/wizcli"
+          export PATH="$RUNNER_TEMP:$PATH"
+
+          wizcli auth --id "$WIZ_CLIENT_ID" --secret "$WIZ_CLIENT_SECRET"
+
+          project_args=()
+          if [ -n "$WIZ_PROJECT_ID" ]; then project_args=(--projects "$WIZ_PROJECT_ID"); fi
+
+          # SAST needs a Wiz Code license, so the scan disables it.
+          wizcli scan dir . \
+            --name "$GITHUB_REPOSITORY@$SCAN_BRANCH" \
+            --disabled-scanners SAST \
+            ${project_args[@]+"${project_args[@]}"} \
+            --policies "Default vulnerabilities policy" \
+            --policies "Default secrets policy" \
+            --policies "Default malware policy" \
+            --policies "Default sensitive data policy" \
+            --policies "Default software license policy" \
+            --policies "Default IaC policy"

@@ -1,0 +1,18 @@
+# This file sets the prod inputs of the MCP server root. All values are public.
+# CI refuses to plan while a REPLACE_ME remains.
+
+project_id = "REPLACE_ME"
+
+# scripts/bootstrap-tools.sh prints this value.
+wif_pool           = "REPLACE_ME"
+github_environment = "prod"
+
+region = "us-central1"
+
+# service_name starts the names of the service and its service accounts.
+# Use the same value in every environment.
+service_name           = "mcp-server"
+artifact_registry_repo = "mcp-server"
+
+# Only the gateway can reach the service. Use INGRESS_TRAFFIC_ALL if you delete infra/gateway.
+cloud_run_ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"

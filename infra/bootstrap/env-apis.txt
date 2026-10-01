@@ -1,0 +1,8 @@
+# Enabled on each environment project before Terraform first runs against it.
+# Terraform's google_project_service cannot enable the API it needs to enable
+# APIs, and the failure reads as a permission error rather than a disabled
+# service. Everything else each root needs, it enables itself.
+serviceusage.googleapis.com
+cloudresourcemanager.googleapis.com
+iam.googleapis.com
+iamcredentials.googleapis.com

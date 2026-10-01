@@ -1,0 +1,27 @@
+# The roles each environment's Terraform apply identity holds on that
+# environment's project. The only place they are written down:
+# scripts/bootstrap-env.sh grants from this file, scripts/check-apply-roles.sh
+# (run by every plan in CI) fails when the project's policy is missing one.
+#
+# Format: <role> <root> [# what it is for]. A role is required while its root's
+# directory exists under infra/, so deleting a root drops its roles from the
+# check. "*" is every root.
+#
+# Adding a resource type to a root? Add the role that manages it here, re-run
+# bootstrap-env.sh for each environment, then open the pull request.
+#
+# Predefined roles, not a custom one: a custom role has to be re-audited on every
+# provider upgrade. What limits the blast radius is that each environment has its
+# own apply identity, reachable only from main.
+
+roles/serviceusage.serviceUsageAdmin  *           # google_project_service in every root
+roles/iam.serviceAccountAdmin         mcp         # deployer/runtime SAs and their IAM bindings (actAs, WIF)
+roles/iam.serviceAccountUser          mcp         # Cloud Run runs as the runtime SA, which needs actAs on it
+roles/artifactregistry.admin          mcp         # the image repository and its reader/writer grants
+roles/run.admin                       mcp         # the Cloud Run service and its IAM
+roles/compute.networkAdmin            gateway     # serverless NEG, backend, URL map, proxy, address, forwarding rule
+roles/compute.securityAdmin           gateway     # Cloud Armor policy, SSL policy
+roles/compute.loadBalancerAdmin       gateway     # managed certificate and load-balancer components
+roles/monitoring.editor               monitoring  # alert policies, notification channels, dashboard
+roles/logging.configWriter            monitoring  # the edge-denials log-based metric
+roles/logging.viewer                  monitoring  # reading log-based metrics back on refresh

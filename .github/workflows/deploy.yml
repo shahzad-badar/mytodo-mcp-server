@@ -1,0 +1,37 @@
+name: Deploy
+
+# A push to main that changes the image deploys to dev once ENABLED_ENVIRONMENTS lists dev.
+# The template repository never deploys. deploy-prod.yml promotes a deployed commit to prod.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "infra/**"
+      - "scripts/bootstrap-*.sh"
+      - "scripts/check-*.sh"
+      - ".github/workflows/terraform.yml"
+  # A manual run deploys the tip of main. _deploy.yml refuses any other commit.
+  workflow_dispatch:
+
+# A newer push cancels an older dev deploy so the older run never lands after the newer one.
+# The group key names dev, so a dev push never cancels a prod deploy.
+concurrency:
+  group: deploy-dev-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write # required for Workload Identity Federation
+
+jobs:
+  dev:
+    # The padding spaces make dev match the whole word and not devtest.
+    if: ${{ !github.event.repository.is_template && contains(format(' {0} ', vars.ENABLED_ENVIRONMENTS), ' dev ') }}
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: dev
+      image_source: build
+      sha: ${{ github.sha }}
+    secrets: inherit
