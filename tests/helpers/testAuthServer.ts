@@ -42,13 +42,13 @@ export async function setupTestAuth(extraEnv: Record<string, string> = {}): Prom
     AS_ISSUER: TEST_ISSUER,
     RESOURCE_AUDIENCE: TEST_AUDIENCE,
     RESOURCE_BASE_URL: "http://localhost",
-    SCOPES_SUPPORTED: "tools.hello tools.ping tools.test",
+    SCOPES_SUPPORTED: "tools.ping tools.add_todo tools.list_todos tools.complete_todo tools.delete_todo",
     ...extraEnv,
   });
 
   async function mintToken(opts: MintOptions = {}): Promise<string> {
     return new SignJWT({
-      scp: opts.scp ?? "tools.hello tools.ping tools.test",
+      scp: opts.scp ?? "tools.ping tools.add_todo tools.list_todos tools.complete_todo tools.delete_todo",
       azp: opts.azp ?? "test-client-id",
       sub: opts.sub ?? "user@example.com",
       preferred_username: opts.preferredUsername ?? "user@example.com",

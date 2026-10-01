@@ -6,9 +6,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createHttpServer, MCP_PATH } from "../src/server.js";
 import { setupTestAuth, type TestAuth } from "./helpers/testAuthServer.js";
-import { TEST_MESSAGE } from "../src/tools/test.js";
 import { DEFAULT_TOOL_SCOPES } from "../src/auth/config.js";
 import { ADMIN, MEMBER } from "../src/auth/roles.js";
+import { createMemoryStore } from "../src/store/memoryStore.js";
+import type { Todo } from "../src/store/store.js";
 
 // These tests drive the real server through an MCP client with a test token.
 describe("mcp server", () => {
@@ -20,7 +21,7 @@ describe("mcp server", () => {
   before(async () => {
     auth = await setupTestAuth();
     token = await auth.mintToken({ scp: DEFAULT_TOOL_SCOPES.join(" ") });
-    server = createHttpServer({ config: auth.config, getKey: auth.getKey });
+    server = createHttpServer({ config: auth.config, getKey: auth.getKey, store: createMemoryStore() });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     const { port } = server.address() as AddressInfo;
     baseUrl = `http://127.0.0.1:${port}`;
@@ -63,43 +64,7 @@ describe("mcp server", () => {
       const { tools } = await client.listTools();
       return tools.map((t) => t.name).sort();
     });
-    // TODO: update this list whenever you add or remove a tool.
-    assert.deepEqual(names, ["hello", "ping", "test"]);
-  });
-
-  it("greets with a provided name", async () => {
-    const text = await withClient(async (client) => {
-      const result = await client.callTool({ name: "hello", arguments: { name: "World" } });
-      return (result.content as Array<{ type: string; text: string }>)[0].text;
-    });
-    assert.equal(text, "Hello, World!");
-  });
-
-  it("greets the world by default", async () => {
-    const text = await withClient(async (client) => {
-      const result = await client.callTool({ name: "hello", arguments: {} });
-      return (result.content as Array<{ type: string; text: string }>)[0].text;
-    });
-    assert.equal(text, "Hello, world!");
-  });
-
-  it("rejects a name longer than 100 characters", async () => {
-    const result = await withClient((client) =>
-      client.callTool({ name: "hello", arguments: { name: "x".repeat(101) } }),
-    );
-    assert.equal(result.isError, true);
-  });
-
-  it("returns the greeting as structured content", async () => {
-    const result = await withClient((client) => client.callTool({ name: "hello", arguments: { name: "World" } }));
-    assert.deepEqual(result.structuredContent, { greeting: "Hello, World!" });
-  });
-
-  it("marks every example tool as read-only", async () => {
-    const tools = await withClient(async (client) => (await client.listTools()).tools);
-    for (const tool of tools) {
-      assert.equal(tool.annotations?.readOnlyHint, true, `${tool.name} is not marked read-only`);
-    }
+    assert.deepEqual(names, ["add_todo", "complete_todo", "delete_todo", "list_todos", "ping"]);
   });
 
   it("returns an ISO timestamp from ping", async () => {
@@ -110,16 +75,90 @@ describe("mcp server", () => {
     assert.equal(text, new Date(text).toISOString());
   });
 
-  it("returns the marker string from test", async () => {
-    const text = await withClient(async (client) => {
-      const result = await client.callTool({ name: "test", arguments: {} });
-      return (result.content as Array<{ type: string; text: string }>)[0].text;
-    });
-    assert.equal(text, TEST_MESSAGE);
+  it("adds a todo and returns it with an id", async () => {
+    const result = await withClient((client) =>
+      client.callTool({ name: "add_todo", arguments: { title: "Buy milk" } }),
+    );
+    const todo = JSON.parse((result.content as Array<{ text: string }>)[0].text) as Todo;
+    assert.equal(todo.title, "Buy milk");
+    assert.equal(todo.completed, false);
+    assert.ok(todo.id, "id should be set");
   });
+
+  it("lists todos and includes the one just added", async () => {
+    await withClient((client) =>
+      client.callTool({ name: "add_todo", arguments: { title: "Write tests" } }),
+    );
+    const result = await withClient((client) =>
+      client.callTool({ name: "list_todos", arguments: {} }),
+    );
+    const todos = JSON.parse((result.content as Array<{ text: string }>)[0].text) as Todo[];
+    assert.ok(todos.some((t) => t.title === "Write tests"));
+  });
+
+  it("completes a todo and marks it done", async () => {
+    const addResult = await withClient((client) =>
+      client.callTool({ name: "add_todo", arguments: { title: "Ship feature" } }),
+    );
+    const added = JSON.parse((addResult.content as Array<{ text: string }>)[0].text) as Todo;
+
+    const completeResult = await withClient((client) =>
+      client.callTool({ name: "complete_todo", arguments: { id: added.id } }),
+    );
+    const completed = JSON.parse((completeResult.content as Array<{ text: string }>)[0].text) as Todo;
+    assert.equal(completed.completed, true);
+    assert.equal(completed.id, added.id);
+  });
+
+  it("deletes a todo", async () => {
+    const addResult = await withClient((client) =>
+      client.callTool({ name: "add_todo", arguments: { title: "To be deleted" } }),
+    );
+    const added = JSON.parse((addResult.content as Array<{ text: string }>)[0].text) as Todo;
+
+    const deleteResult = await withClient((client) =>
+      client.callTool({ name: "delete_todo", arguments: { id: added.id } }),
+    );
+    const body = JSON.parse((deleteResult.content as Array<{ text: string }>)[0].text) as { deleted: string };
+    assert.equal(body.deleted, added.id);
+  });
+
+  it("returns an error when completing a non-existent todo", async () => {
+    const result = await withClient((client) =>
+      client.callTool({ name: "complete_todo", arguments: { id: "00000000-0000-0000-0000-000000000000" } }),
+    );
+    assert.equal(result.isError, true);
+  });
+
+  it("returns an error when deleting a non-existent todo", async () => {
+    const result = await withClient((client) =>
+      client.callTool({ name: "delete_todo", arguments: { id: "00000000-0000-0000-0000-000000000000" } }),
+    );
+    assert.equal(result.isError, true);
+  });
+
+  it("filters todos by completion status", async () => {
+    await withClient((client) =>
+      client.callTool({ name: "add_todo", arguments: { title: "Incomplete task" } }),
+    );
+    const addResult = await withClient((client) =>
+      client.callTool({ name: "add_todo", arguments: { title: "Task to complete" } }),
+    );
+    const added = JSON.parse((addResult.content as Array<{ text: string }>)[0].text) as Todo;
+    await withClient((client) =>
+      client.callTool({ name: "complete_todo", arguments: { id: added.id } }),
+    );
+
+    const doneResult = await withClient((client) =>
+      client.callTool({ name: "list_todos", arguments: { completed: true } }),
+    );
+    const doneTodos = JSON.parse((doneResult.content as Array<{ text: string }>)[0].text) as Todo[];
+    assert.ok(doneTodos.every((t) => t.completed));
+  });
+
   // A tool needs the role and the scope. A token with only one of them reaches nothing.
   describe("what a role grants", () => {
-    async function callHello(as: string): Promise<Response> {
+    async function callListTodos(as: string): Promise<Response> {
       return fetch(`${baseUrl}${MCP_PATH}`, {
         method: "POST",
         headers: {
@@ -131,32 +170,30 @@ describe("mcp server", () => {
           jsonrpc: "2.0",
           id: 1,
           method: "tools/call",
-          params: { name: "hello", arguments: {} },
+          params: { name: "list_todos", arguments: {} },
         }),
       });
     }
 
     it("refuses a token carrying the scopes but no role, with nothing to retry", async () => {
-      const res = await callHello(await auth.mintToken({ roles: [] }));
+      const res = await callListTodos(await auth.mintToken({ roles: [] }));
       assert.equal(res.status, 403);
       assert.equal(((await res.json()) as { error: string }).error, "insufficient_role");
-      // Only the directory grants a role. The response therefore carries no challenge.
       assert.equal(res.headers.get("www-authenticate"), null);
     });
 
     it("refuses a role whose client asked for no scope, and says what to ask for", async () => {
-      const res = await callHello(await auth.mintToken({ roles: [ADMIN], scp: "" }));
+      const res = await callListTodos(await auth.mintToken({ roles: [ADMIN], scp: "" }));
       assert.equal(res.status, 403);
       assert.equal(((await res.json()) as { error: string }).error, "insufficient_scope");
       assert.match(res.headers.get("www-authenticate") ?? "", /insufficient_scope/);
     });
 
     it("admits a token carrying both halves", async () => {
-      const res = await callHello(await auth.mintToken({ roles: [MEMBER] }));
+      const res = await callListTodos(await auth.mintToken({ roles: [MEMBER] }));
       assert.equal(res.status, 200);
     });
 
-    // The server builds the tool list from each caller's token. A role alone must not list every tool.
     it("lists only the tools whose scope the caller actually holds", async () => {
       const narrow = await auth.mintToken({ roles: [MEMBER], scp: "tools.ping" });
       const names = await withClient(async (client) => {

@@ -27,11 +27,12 @@ function parseList(raw: string | undefined, lower = false): string[] {
     .filter(Boolean);
 }
 
-// TODO: add one entry per tool you register in src/mcp.ts
 export const DEFAULT_TOOL_SCOPES = [
-  "tools.hello",
   "tools.ping",
-  "tools.test",
+  "tools.add_todo",
+  "tools.list_todos",
+  "tools.complete_todo",
+  "tools.delete_todo",
 ] as const;
 
 function parseScopes(raw: string | undefined): string[] {

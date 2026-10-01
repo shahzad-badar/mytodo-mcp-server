@@ -27,7 +27,7 @@ describe("tool audit", () => {
 
   it("writes only the declared fields", async () => {
     const token = await auth.mintToken();
-    const [line] = await auditOf(() => send(callTool("hello"), token));
+    const [line] = await auditOf(() => send(callTool("list_todos"), token));
     assert.deepEqual(Object.keys(line ?? {}).sort(), [
       "agentClientId",
       "audience",
@@ -46,15 +46,15 @@ describe("tool audit", () => {
 
   it("records an allowed call", async () => {
     const token = await auth.mintToken();
-    const res = await auditOf(() => send(callTool("hello"), token));
+    const res = await auditOf(() => send(callTool("list_todos"), token));
     assert.equal(res.length, 1);
     assert.equal(res[0]?.outcome, "allow");
-    assert.equal(res[0]?.toolName, "hello");
+    assert.equal(res[0]?.toolName, "list_todos");
   });
 
   it("records a call refused for a missing scope", async () => {
     const token = await auth.mintToken({ scp: "tools.ping" });
-    const [line] = await auditOf(() => send(callTool("hello"), token));
+    const [line] = await auditOf(() => send(callTool("list_todos"), token));
     assert.equal(line?.outcome, "deny");
     assert.deepEqual(line?.scopes, ["tools.ping"]);
   });
@@ -70,7 +70,7 @@ describe("tool audit", () => {
 
   it("keeps tool arguments out of the audit line", async () => {
     const token = await auth.mintToken();
-    const lines = await captureLog("log", () => send(callTool("hello", { name: "ACME-private" }), token));
+    const lines = await captureLog("log", () => send(callTool("add_todo", { title: "ACME-private" }), token));
     assert.equal(entriesOf(lines, "tool-audit").length, 1);
     assert.doesNotMatch(lines.join("\n"), /ACME-private/);
   });

@@ -9,6 +9,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { createMcpServer } from "./mcp.js";
 import { loadAuthConfig, warnIfAudienceLooksLikeUri, type AuthConfig } from "./auth/config.js";
+import type { TodoStore } from "./store/store.js";
+import { createMemoryStore } from "./store/memoryStore.js";
 import { createTokenVerifier, createRemoteJwks } from "./auth/tokenVerifier.js";
 import { entraDiscoveryRouter, proxyDiscoveryRouter, resourceMetadataUrl } from "./auth/protectedResource.js";
 import { requireToolScope } from "./auth/scopeEnforcement.js";
@@ -33,15 +35,21 @@ export type ServerDeps = {
   readonly getKey?: JWTVerifyGetKey;
   readonly proxyConfig?: ProxyConfig;
   readonly requestTimeoutMs?: number;
-  // TODO: add injectable domain deps here (e.g. a store) for test injection.
+  readonly store?: TodoStore;
 };
 
-async function handleMcpRequest(req: Request, res: Response, timeoutMs: number): Promise<void> {
+async function handleMcpRequest(
+  req: Request,
+  res: Response,
+  timeoutMs: number,
+  store: TodoStore,
+): Promise<void> {
   const auth = (req as Request & { auth?: AuthInfo }).auth;
   const server = createMcpServer({
     scopes: auth?.scopes ?? [],
     roles: rolesOf(auth),
-    // TODO: pass domain context here (e.g. callerEmailOf(req), store).
+    ownerEmail: callerEmailOf(req),
+    store,
   });
   // The transport answers in JSON and sends nothing before the tool returns.
   // A request that times out can then still get a 504.
@@ -81,6 +89,7 @@ export function createHttpServer(deps: ServerDeps = {}): Server {
   warnIfAudienceLooksLikeUri(config);
   const proxyConfig = deps.proxyConfig ?? loadProxyConfig();
   const getKey = deps.getKey ?? createRemoteJwks(config);
+  const store = deps.store ?? createMemoryStore();
   const verifier = createTokenVerifier(config, getKey);
   const rmUrl = resourceMetadataUrl(config, MCP_PATH);
 
@@ -111,7 +120,7 @@ export function createHttpServer(deps: ServerDeps = {}): Server {
     requireCallerEmail(),
     requireToolScope({ audience: config.resourceAudience, resourceMetadataUrl: rmUrl }),
     (req, res) => {
-      void handleMcpRequest(req, res, deps.requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
+      void handleMcpRequest(req, res, deps.requestTimeoutMs ?? REQUEST_TIMEOUT_MS, store);
     },
   );
 

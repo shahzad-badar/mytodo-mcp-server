@@ -6,7 +6,7 @@ import { setupTestAuth, type TestAuth } from "./helpers/testAuthServer.js";
 import { callTool, INITIALIZE, startServer, textOf, type RunningServer } from "./helpers/httpServer.js";
 
 // This list is narrower than DEFAULT_TOOL_SCOPES. The tests can then tell the configured list from the default.
-const SCOPES_SUPPORTED = "tools.hello tools.ping";
+const SCOPES_SUPPORTED = "tools.list_todos tools.ping";
 
 describe("mcp auth", () => {
   let auth: TestAuth;
@@ -30,7 +30,7 @@ describe("mcp auth", () => {
   it("advertises exactly the configured scopes", async () => {
     const res = await fetch(`${running.baseUrl}/.well-known/oauth-protected-resource${MCP_PATH}`);
     const body = (await res.json()) as { scopes_supported: string[] };
-    assert.deepEqual([...body.scopes_supported].sort(), ["tools.hello", "tools.ping"]);
+    assert.deepEqual([...body.scopes_supported].sort(), ["tools.list_todos", "tools.ping"]);
   });
 
   it("rejects a request with no token and points at the metadata", async () => {
@@ -81,14 +81,14 @@ describe("mcp auth", () => {
   });
 
   it("asks for the union of held and missing scopes on step-up", async () => {
-    const res = await running.post(callTool("hello"), await auth.mintToken({ scp: "tools.ping" }));
+    const res = await running.post(callTool("list_todos"), await auth.mintToken({ scp: "tools.ping" }));
     assert.equal(res.status, 403);
     const header = res.headers.get("www-authenticate") ?? "";
     // A client replaces its scopes when it signs in again. The challenge must name the held scopes too.
     const asked = (header.match(/scope="([^"]*)"/)?.[1] ?? "").split(" ").sort();
-    assert.deepEqual(asked, ["tools.hello", "tools.ping"]);
+    assert.deepEqual(asked, ["tools.list_todos", "tools.ping"]);
     const body = (await res.json()) as { scope: string };
-    assert.deepEqual(body.scope.split(" ").sort(), ["tools.hello", "tools.ping"]);
+    assert.deepEqual(body.scope.split(" ").sort(), ["tools.list_todos", "tools.ping"]);
   });
 
   it("rejects a malformed tool name without echoing it", async () => {
@@ -101,7 +101,7 @@ describe("mcp auth", () => {
 
   it("fails closed on a body it cannot parse", async () => {
     const token = await auth.mintToken();
-    const res = await running.post(JSON.stringify(callTool("hello")), token, { "content-type": "text/plain" });
+    const res = await running.post(JSON.stringify(callTool("list_todos")), token, { "content-type": "text/plain" });
     assert.equal(res.status, 400);
   });
 
@@ -121,17 +121,18 @@ describe("mcp auth", () => {
   });
 
   it("rejects a JSON-RPC batch", async () => {
-    const res = await running.post([callTool("hello"), callTool("ping")], await auth.mintToken());
+    const res = await running.post([callTool("list_todos"), callTool("ping")], await auth.mintToken());
     assert.equal(res.status, 400);
     assert.equal(((await res.json()) as { error: string }).error, "invalid_request");
   });
 
   it("admits an admin whose client asked for the scope", async () => {
-    const token = await auth.mintToken({ roles: [ADMIN], scp: "tools.hello" });
-    const text = await running.withClient(token, async (client) =>
-      textOf(await client.callTool({ name: "hello", arguments: { name: "Admin" } })),
+    const token = await auth.mintToken({ roles: [ADMIN], scp: "tools.list_todos" });
+    const result = await running.withClient(token, async (client) =>
+      client.callTool({ name: "list_todos", arguments: {} }),
     );
-    assert.equal(text, "Hello, Admin!");
+    const todos = JSON.parse(textOf(result)) as unknown[];
+    assert.ok(Array.isArray(todos));
   });
 
   it("marks every response nosniff", async () => {

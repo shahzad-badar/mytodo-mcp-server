@@ -48,7 +48,7 @@ function selfMetadata(config: AuthConfig): OAuthMetadata {
 }
 
 // TODO: replace with your server's display name.
-const RESOURCE_NAME = "My MCP Server";
+const RESOURCE_NAME = "My ToDo MCP Server";
 
 // discoveryRouter serves the RFC 9728 PRM and a copy of the AS metadata.
 function discoveryRouter(config: AuthConfig, mcpPath: string, oauthMetadata: OAuthMetadata): Router {

@@ -80,7 +80,7 @@ describe("oauth proxy", () => {
   it("authorizes: 302 to Entra with PKCE and state passed through, secret absent", async () => {
     const url =
       `${baseUrl}/authorize?redirect_uri=${encodeURIComponent(ALLOWED_REDIRECT)}` +
-      `&state=xyz&code_challenge=chal123&code_challenge_method=S256&scope=tools.hello`;
+      `&state=xyz&code_challenge=chal123&code_challenge_method=S256&scope=tools.list_todos`;
     const res = await fetch(url, { redirect: "manual" });
     assert.equal(res.status, 302);
     const location = res.headers.get("location") ?? "";
@@ -91,7 +91,7 @@ describe("oauth proxy", () => {
     assert.equal(redirected.searchParams.get("code_challenge_method"), "S256");
     assert.equal(redirected.searchParams.get("state"), "xyz");
     const scope = redirected.searchParams.get("scope") ?? "";
-    assert.ok(scope.includes(`api://${TEST_AUDIENCE}/tools.hello`), `translated scope missing in "${scope}"`);
+    assert.ok(scope.includes(`api://${TEST_AUDIENCE}/tools.list_todos`), `translated scope missing in "${scope}"`);
     assert.ok(scope.includes("openid"), "OIDC scopes must be injected");
     assert.ok(!location.includes(CLIENT_SECRET), "the secret value must never appear in a redirect");
   });
@@ -136,7 +136,7 @@ describe("oauth proxy", () => {
 
     const url =
       `${baseUrl}/authorize?redirect_uri=${encodeURIComponent(LOOPBACK_REDIRECT)}` +
-      `&code_challenge=chal123&code_challenge_method=S256&scope=tools.hello`;
+      `&code_challenge=chal123&code_challenge_method=S256&scope=tools.list_todos`;
     const auth2 = await fetch(url, { redirect: "manual" });
     assert.equal(auth2.status, 302);
     assert.equal(new URL(auth2.headers.get("location") ?? "").searchParams.get("redirect_uri"), LOOPBACK_REDIRECT);
