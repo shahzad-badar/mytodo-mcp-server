@@ -1,10 +1,10 @@
 # This file sets the dev inputs of the MCP server root. All values are public.
 # CI refuses to plan while a REPLACE_ME remains.
 
-project_id = "REPLACE_ME"
+project_id = "ai-enablement-dev-0cf5f"
 
 # scripts/bootstrap-tools.sh prints this value.
-wif_pool           = "REPLACE_ME"
+wif_pool           = "projects/970749219253/locations/global/workloadIdentityPools/mytodo-mcp-deploy-github"
 github_environment = "dev"
 
 region = "us-central1"

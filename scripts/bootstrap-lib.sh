@@ -150,7 +150,7 @@ preflight_permissions() {
     -H "Content-Type: application/json" \
     -d "$body" \
     "https://cloudresourcemanager.googleapis.com/v1/projects/$project:testIamPermissions" |
-    jq -r '.permissions // [] | .[]')
+    jq -r '.permissions // [] | .[]' | tr -d '\r')
   missing_perms=$(comm -23 <(printf '%s\n' "$wanted" | sort -u) <(printf '%s\n' "$granted" | sort -u))
   if [[ -n $missing_perms ]]; then
     printf '\nThe account running this (%s) is missing, on %s:\n' "$(gcloud config get-value account 2>/dev/null)" "$project" >&2
@@ -179,7 +179,7 @@ ensure_apis() {
   local absent api todo=()
   absent=$(comm -23 \
     <(strip_comments "$list" | sort -u) \
-    <(gcloud services list --enabled --project="$project" --format='value(config.name)' | sort -u))
+    <(gcloud services list --enabled --project="$project" --format='value(config.name)' | tr -d '\r' | sort -u))
   if [[ -z $absent ]]; then
     ok "APIs enabled on $project"
     return 0

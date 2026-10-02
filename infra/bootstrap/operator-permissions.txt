@@ -20,11 +20,8 @@ tools iam.workloadIdentityPoolProviders.create
 tools iam.workloadIdentityPoolProviders.get
 tools iam.workloadIdentityPoolProviders.update
 tools storage.buckets.create
-tools storage.buckets.get
-tools storage.buckets.update
-tools storage.buckets.getIamPolicy
-tools storage.buckets.setIamPolicy
-tools storage.objects.create
+# storage.buckets.get/update/getIamPolicy/setIamPolicy and storage.objects.create are bucket-level
+# permissions not testable via testIamPermissions at the project resource. roles/owner covers them.
 tools storage.objects.list
 tools resourcemanager.projects.get
 
